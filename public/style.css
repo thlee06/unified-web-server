@@ -1,0 +1,98 @@
+:root {
+  color-scheme: light dark;
+  --bg: #0f1115;
+  --panel-bg: #181b21;
+  --border: #2a2e37;
+  --text: #e6e8eb;
+  --muted: #8b909c;
+  --online: #2fbf71;
+  --offline: #d9534f;
+  --connecting: #d0a72e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+header h1 {
+  font-size: 1.1rem;
+  margin: 0;
+  font-weight: 600;
+}
+
+.conn-badge {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.conn-connecting { background: color-mix(in srgb, var(--connecting) 25%, transparent); color: var(--connecting); }
+.conn-open { background: color-mix(in srgb, var(--online) 25%, transparent); color: var(--online); }
+.conn-closed { background: color-mix(in srgb, var(--offline) 25%, transparent); color: var(--offline); }
+
+#panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 1rem;
+  padding: 1.5rem;
+}
+
+#empty-state {
+  color: var(--muted);
+  grid-column: 1 / -1;
+}
+
+.panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.75rem 1rem 1rem;
+}
+
+.panel.offline {
+  opacity: 0.55;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.4rem;
+}
+
+.panel-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.status-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.status-online { background: color-mix(in srgb, var(--online) 25%, transparent); color: var(--online); }
+.status-offline { background: color-mix(in srgb, var(--offline) 25%, transparent); color: var(--offline); }
+
+.panel .u-legend {
+  font-size: 0.75rem;
+}
