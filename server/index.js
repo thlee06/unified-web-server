@@ -8,10 +8,14 @@ import { PORT, HISTORY_MAX_POINTS } from './config.js';
 import { ModuleRegistry } from './moduleRegistry.js';
 import { createIngestServer } from './ingestServer.js';
 import { createDashboardServer } from './dashboardServer.js';
+import { Store } from './store.js';
+import { createApiRouter } from './apiRoutes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
+const store = new Store();
+app.use('/api', createApiRouter(store));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 const httpServer = http.createServer(app);

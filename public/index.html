@@ -2,22 +2,38 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Test Rig Dashboard</title>
+  <title>TestStand Console</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" href="/vendor/uPlot.min.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap"
+    rel="stylesheet"
+  />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <header>
-    <h1>Test Rig Dashboard</h1>
-    <span id="connection-status" class="conn-badge conn-connecting">connecting&hellip;</span>
-  </header>
+  <div class="app-frame">
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-mark"><span></span></div>
+        <span class="brand-word">TESTSTAND</span>
+        <span class="brand-caption">Data Acquisition Console</span>
+      </div>
+      <div class="header-right">
+        <div class="conn-indicator" id="conn-indicator">
+          <span class="conn-dot"></span>
+          <span id="conn-text">Connecting&hellip;</span>
+        </div>
+        <div class="avatar">RS</div>
+      </div>
+    </header>
 
-  <main id="panels">
-    <p id="empty-state">Waiting for modules to connect&hellip;</p>
-  </main>
+    <nav class="tab-bar" id="tab-bar"></nav>
 
-  <script src="/vendor/uPlot.iife.min.js"></script>
-  <script src="/app.js"></script>
+    <main class="content" id="content"></main>
+  </div>
+
+  <script type="module" src="/js/app.js"></script>
 </body>
 </html>
