@@ -28,6 +28,15 @@ Two modules currently exist:
   runs.
 - **Analyze** - pick a run, see its per-channel stats and full charts, export
   CSV or a text report.
+- **HOTAS Control** - a standalone control screen, separate from the
+  Devices/Calibrate/Collect/Analyze telemetry pipeline above. Reads a USB
+  HOTAS throttle axis via the browser's Gamepad API and streams it directly
+  (not through this server) to a dedicated ESP32 running ESC-arming firmware,
+  over its own WebSocket server. Arming is gated by a physical multi-button
+  gesture on the HOTAS itself, and includes an autopilot mode: plan a
+  throttle-vs-time thrust profile in a chart/table editor, then launch it
+  from the HOTAS to have the ESC run it autonomously. See "HOTAS control
+  wire protocol" below.
 
 ## Quickstart
 
@@ -156,6 +165,148 @@ tare/known-load steps in Calibrate entirely and only needs its probes
 verified. A calibrated module's zero/scale/probe state can be saved as a
 named **profile** and reloaded later to skip recalibration.
 
+## HOTAS control wire protocol
+
+Unlike every other module, the HOTAS ESC-throttle ESP32 does not connect to
+this server at all - it runs its own WebSocket server on port `81` and the
+browser's HOTAS Control tab connects to it directly (`ws://<esp32-host>:81/`),
+since this is a low-latency control loop, not telemetry.
+
+Browser → ESP32 (JSON text frames):
+- `{"type":"arm"}` for a normal manual arm, or `{"type":"arm","autopilot":true}`
+  to arm into an autopilot-armed holding state instead (see below).
+  `autopilot` is sampled from button 26's state at the moment the arm
+  request is sent, but the field is only included when `true` - the browser
+  deliberately does **not** send `autopilot:false`, so a plain manual arm
+  stays byte-for-byte identical to the message format from before this
+  feature existed. This isn't just tidiness: firmware that hasn't been
+  updated yet may have its JSON parse buffer sized tightly for the old,
+  shorter message, and did in practice fail to parse the arm request at all
+  once an unconditional `autopilot:false` field was added - dropping every
+  arm attempt silently. Updated firmware should read this field with
+  ArduinoJson's default-value idiom, `doc["autopilot"] | false`, so an
+  absent field and an explicit `false` are equivalent either way.
+- `{"type":"throttle","value":0.0}` - `value` is `0.0`-`1.0`, sent at ~30Hz
+  while the mapped gamepad axis is live. Sent continuously regardless of
+  mode; the firmware should ignore it whenever it isn't in plain manual
+  `ARMED` state (i.e. while `DISARMED`, `ARMING`, `AUTOPILOT_ARMED`, or
+  `AUTOPILOT_RUNNING`).
+- `{"type":"disarm"}` - explicit disarm. Must abort *any* mode immediately -
+  manual, autopilot-armed-waiting, or a running profile - and force the PWM
+  output back to idle. This is the universal kill switch; nothing about
+  autopilot mode should require a different disarm path.
+- `{"type":"upload_profile","points":[{"t":0,"throttle":0.0},{"t":5000,"throttle":0.6},...]}` -
+  replaces the ESP32's in-memory thrust profile. `t` is milliseconds from
+  profile start, `throttle` is `0.0`-`1.0`. Points arrive already sorted by
+  `t` and deduplicated/clamped/bounded (see `normalizePoints()` in
+  `public/js/thrustProfile.js` - max 64 points, max 5 minute span), but
+  firmware should still validate defensively rather than trust the browser
+  blindly. Can arrive at any time, including while disarmed; storage is
+  RAM-only (cleared on reboot) - the browser re-uploads the active profile
+  on every reconnect and every edit, so nothing needs to persist across a
+  power cycle.
+- `{"type":"launch_autopilot"}` - only meaningful while the ESP32 reports
+  `mode: "autopilot_armed"`; starts executing the currently-stored profile
+  from `t=0` on the ESP32's own clock. Sent by the browser once button 25
+  has been held continuously for 3 seconds.
+
+ESP32 → Browser:
+- `{"type":"status","armed":true,"mode":"manual","pwm_us":1500,"uptime_ms":123456,"autopilot_elapsed_ms":null}` -
+  sent on every state change plus a ~5Hz heartbeat. `mode` is one of
+  `"manual"`, `"autopilot_armed"`, or `"autopilot_running"`.
+  `autopilot_elapsed_ms` is the profile-relative elapsed time (only
+  meaningful, i.e. non-null, while `mode` is `"autopilot_running"`) - the
+  browser uses it to drive a live progress marker on the profile chart. The
+  browser's client already defaults a missing `mode` field to `"manual"`,
+  so this is additive/backward-compatible with firmware that hasn't been
+  updated yet.
+
+The firmware treats silence as a fault: no `throttle`/`arm` frame for 300ms
+while armed forces the PWM output back to idle (1000&micro;s) and drops back
+to disarmed, and a fresh connection always starts disarmed regardless of
+prior state. This 300ms firmware timeout is the *only* thing that disarms on
+loss of signal - the browser does not proactively disarm on tab visibility
+changes. The polling/send loop in `hotasControl.js` runs on `setInterval`,
+not `requestAnimationFrame`, specifically so a browser tab losing focus or
+being briefly backgrounded (e.g. glancing at the ESP32 right after arming)
+doesn't itself cut off outgoing throttle frames - `requestAnimationFrame`
+callbacks are fully paused by browsers the instant a tab is hidden, which
+used to trip the firmware's failsafe on every incidental tab switch. Note
+this doesn't fully defeat browser background-tab timer throttling (Chrome
+clamps backgrounded timers to roughly 1/sec), so switching away from the
+browser tab for any real length of time - as opposed to a brief glance while
+it stays visible - will still likely trip the 300ms firmware failsafe; that's
+the intended backstop, not a bug. The browser does still send an explicit
+disarm on `beforeunload` (actually closing/navigating away from the page).
+It deliberately does **not** disarm when you merely switch between this
+app's own tabs (e.g. to Collect) - see `public/js/hotasControl.js` below.
+The gamepad axis mapping (which axis is "throttle", and whether it's
+inverted) is chosen in the UI per-device and persisted in the browser's
+`localStorage`, since a HOTAS throttle unit can map to different axis
+indices across browsers/OSes. Axes `2`, `5`, and `6` are additionally
+hardware-inverted unconditionally (`HARDWARE_INVERTED_AXES` in
+`hotasControl.js`) because they read backwards on this particular
+controller - this is separate from, and applied before, the per-mapping
+invert checkbox.
+
+Arming itself is gated by a physical five-button gesture on the HOTAS (not a
+clickable UI button): hold buttons 15+16, then hold 30+31 for 3 seconds,
+then flip button 23 from off to on. Buttons 15+16 aren't just a one-time
+gate to *start* arming - they're a continuous dead-man's interlock. Losing
+either one at any point (including after you're already armed, or if the
+gamepad disconnects entirely) sends an explicit disarm frame immediately,
+not just a local reset of the arming-sequence UI state; before this it was
+possible to release 15/16 (or hit Emergency disarm) while a throttle value
+kept streaming and have the ESC output keep responding, because nothing
+after the initial arming gesture was still watching the interlock. This is
+enforced client-side in `hotasControl.js` and visualized live as a 3-step
+sequence on the HOTAS Control tab. Button 23's
+"off to on" requirement is tracked as "was 23 observed off at any point
+during this attempt" (`seq.masterOffSeen`), not a single-tick edge - a
+literal single-frame edge check turned out to be too precise for real human
+timing, since flipping 23 right around the same moment the 3-second hold
+completes could land on the wrong side of the stage transition and get
+missed entirely.
+
+The WS connection, gamepad polling loop, and arm-sequence state all live in
+`public/js/hotasControl.js` as a persistent singleton, not inside the HOTAS
+Control view - they start once at page load and keep running regardless of
+which tab is active, which is what lets the Collect page show a live
+throttle readout without requiring you to stay on the HOTAS tab.
+
+### Autopilot mode
+
+The HOTAS Control tab includes a thrust-profile editor (`public/js/thrustProfile.js`
+for the data model/persistence, the chart/table UI lives in
+`public/js/views/hotas.js`): a piecewise-linear throttle-vs-time curve, edited
+either by dragging points on an SVG chart or typing exact values into a
+per-point time/throttle table. Profiles are named, saved to the browser's
+`localStorage` (this bypasses the Node server entirely, same as everything
+else HOTAS-related), and the currently-active one is uploaded to the ESP32
+automatically on every edit (debounced ~300ms) and on every reconnect.
+
+Autopilot is selected, not toggled independently of arming: button 26's
+state *at the moment the arm request goes out* decides the mode for that
+arm cycle - held on, the ESP32 should come up in a new `AUTOPILOT_ARMED`
+state instead of plain `ARMED`, holding at idle PWM and ignoring stick
+throttle, and wait for the browser's `launch_autopilot` command (sent after
+button 25 is held 3 seconds) before transitioning to `AUTOPILOT_RUNNING` and
+executing the stored profile from its own internal timer - piecewise-linear
+interpolation between points, holding at the first point's value before
+`t=0` is reached. Reaching the final point's time ends the run - force idle
+PWM and return to `DISARMED`, the same "default to the most-idle state"
+philosophy as every other safety transition in this system, rather than
+holding the last value or looping. Button 26 being off at arm time is
+unchanged from today: normal `ARMED`, manual stick control.
+
+This preserves every existing safety property rather than adding a
+parallel/separate one: the 15+16 dead-man's interlock, the 300ms failsafe,
+and `{"type":"disarm"}` must all still immediately halt an in-progress
+autopilot run exactly as they already halt manual throttle, since none of
+that logic is mode-specific on the browser side (see `disarmOrReset()` in
+`hotasControl.js`) and shouldn't become mode-specific on the firmware side
+either.
+
 ## Project layout
 
 ```
@@ -178,7 +329,9 @@ public/
   js/calibration.js         Zero/scale-fit math, channel grouping, isCalibrated()
   js/charts.js               SVG polyline helpers + series color palette
   js/api.js, js/format.js     REST client, formatting helpers
-  js/views/                    devices.js, calibrate.js, collect.js, analyze.js
+  js/hotasControl.js            Persistent HOTAS WS/gamepad/arm-sequence singleton (survives tab switches)
+  js/thrustProfile.js           Thrust-profile data model: localStorage-backed named profiles, interpolation
+  js/views/                    devices.js, calibrate.js, collect.js, analyze.js, hotas.js
   vendor/               Vendored uPlot charting library (unused by the current UI)
 tools/
   simulate-module.js    Mock ESP32 for testing without hardware

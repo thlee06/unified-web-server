@@ -6,12 +6,14 @@ import * as devicesView from './views/devices.js';
 import * as calibrateView from './views/calibrate.js';
 import * as collectView from './views/collect.js';
 import * as analyzeView from './views/analyze.js';
+import * as hotasView from './views/hotas.js';
 
 const TABS = [
   { id: 'devices', num: '·', label: 'Devices' },
   { id: 'calibrate', num: '1', label: 'Calibrate' },
   { id: 'collect', num: '2', label: 'Collect' },
   { id: 'analyze', num: '3', label: 'Analyze' },
+  { id: 'hotas', num: '·', label: 'HOTAS Control' },
 ];
 
 const VIEWS = {
@@ -19,6 +21,7 @@ const VIEWS = {
   calibrate: calibrateView,
   collect: collectView,
   analyze: analyzeView,
+  hotas: hotasView,
 };
 
 const connIndicatorEl = document.getElementById('conn-indicator');

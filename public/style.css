@@ -379,6 +379,17 @@ a { color: var(--accent); text-decoration: none; }
 
 /* ---------- collect screen ---------- */
 
+.hotas-mini {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 18px;
+  margin-bottom: 20px;
+}
+.hotas-mini-label { font-size: 12.5px; color: var(--muted); flex: none; }
+.hotas-mini-track { width: 160px; flex: none; }
+.hotas-mini-val { width: 44px; flex: none; color: #4A463E; }
+
 .collect-title-row { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
 
 .recording-pill {
@@ -483,3 +494,50 @@ a { color: var(--accent); text-decoration: none; }
 .stat-value .unit { font-size: 12px; color: var(--faint); margin-left: 4px; }
 
 .empty-state { padding: 60px 20px; text-align: center; color: var(--muted); font-size: 14px; }
+
+/* ---------- hotas screen ---------- */
+
+.hotas-layout { display: grid; grid-template-columns: 1fr 340px; gap: 20px; align-items: start; }
+@media (max-width: 980px) { .hotas-layout { grid-template-columns: 1fr; } }
+
+.axis-bar-track { flex: 1; height: 8px; border-radius: 4px; background: var(--border-soft); overflow: hidden; }
+.axis-bar-fill { height: 100%; background: var(--accent); width: 0%; }
+.readout-panel .axis-bar-track { background: #2E2C28; }
+
+.axis-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  font-size: 12.5px;
+}
+.axis-row .name { width: 54px; color: #4A463E; flex: none; }
+.axis-row .val { width: 50px; text-align: right; color: #A8A297; flex: none; }
+.axis-row .invert-label { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); flex: none; }
+.axis-row .btn { flex: none; }
+
+.button-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+.button-chip {
+  min-width: 30px;
+  height: 30px;
+  padding: 0 6px;
+  border-radius: 7px;
+  border: 1.5px solid #DAD6CE;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: #6B6659;
+}
+.button-chip.active { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+
+/* ---------- thrust profile editor ---------- */
+
+.profile-chart-wrap { border: 1px solid var(--border-soft); border-radius: 10px; padding: 12px; background: #FDFCFA; }
+.profile-chart-wrap svg { width: 100%; height: 220px; display: block; touch-action: none; }
+.profile-axis-caption { margin-top: 8px; font-size: 11.5px; color: var(--faint); }
+.point-input { padding: 6px 8px; font-size: 13px; width: 100%; }
+.point-row .pt { color: var(--faint); }

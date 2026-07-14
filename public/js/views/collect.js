@@ -4,6 +4,7 @@ import { onLiveSample } from '../liveBus.js';
 import { startRecording, stopRecording } from '../recorder.js';
 import { toPath, seriesColor } from '../charts.js';
 import { fmtElapsed, fmtNum, escapeHtml } from '../format.js';
+import { hotasState, onHotasChange } from '../hotasControl.js';
 
 const WINDOW_SIZE = 240;
 const CHART_W = 820;
@@ -87,6 +88,13 @@ export function render(container) {
     <div class="collect-title-row">
       <h1 class="page-title">Collect data</h1>
       ${c.recording ? `<span class="recording-pill"><span class="dot"></span>Recording &middot; <span id="collect-elapsed" class="mono">00:00:00</span></span>` : ''}
+    </div>
+
+    <div class="card hotas-mini">
+      <span class="hotas-mini-label">HOTAS throttle</span>
+      <div class="axis-bar-track hotas-mini-track"><div class="axis-bar-fill" id="collect-throttle-bar" style="width:0%"></div></div>
+      <span class="mono hotas-mini-val" id="collect-throttle-val">&mdash;</span>
+      <span class="chip chip-warn" id="collect-hotas-armed">DISCONNECTED</span>
     </div>
 
     <div class="collect-layout">
@@ -187,6 +195,32 @@ export function render(container) {
   // --- live patching (no full re-render) ---
   const elapsedEl = container.querySelector('#collect-elapsed');
 
+  const throttleBarEl = container.querySelector('#collect-throttle-bar');
+  const throttleValEl = container.querySelector('#collect-throttle-val');
+  const armedChipEl = container.querySelector('#collect-hotas-armed');
+
+  function paintHotas() {
+    if (hotasState.throttle !== null) {
+      throttleValEl.textContent = `${Math.round(hotasState.throttle * 100)}%`;
+      throttleBarEl.style.width = `${(hotasState.throttle * 100).toFixed(1)}%`;
+    } else {
+      throttleValEl.textContent = '—';
+      throttleBarEl.style.width = '0%';
+    }
+    if (hotasState.wsStatus !== 'open') {
+      armedChipEl.textContent = 'DISCONNECTED';
+      armedChipEl.className = 'chip chip-warn';
+    } else if (hotasState.armed) {
+      armedChipEl.textContent = 'ARMED';
+      armedChipEl.className = 'chip chip-ok';
+    } else {
+      armedChipEl.textContent = 'DISARMED';
+      armedChipEl.className = 'chip chip-warn';
+    }
+  }
+  paintHotas();
+  const unsubscribeHotas = onHotasChange(paintHotas);
+
   function paintGroups() {
     for (const g of groups) {
       const line = container.querySelector(`[data-load-line="${CSS.escape(g.id)}"]`);
@@ -243,6 +277,7 @@ export function render(container) {
 
   return () => {
     unsubscribe();
+    unsubscribeHotas();
     if (timerHandle) clearInterval(timerHandle);
   };
 }
