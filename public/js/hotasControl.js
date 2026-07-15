@@ -35,6 +35,26 @@ export const BTN_AUTOPILOT_ENABLE = 26;
 export const BTN_LAUNCH = 25;
 export const LAUNCH_MS = 3000;
 
+// Printed labels on the physical HOTAS unit for the button IDs above -
+// purely cosmetic (UI display only), doesn't affect which numeric buttons
+// are read. Keyed by gamepad button index.
+export const BTN_LABELS = {
+  15: 'ENG L',
+  16: 'FLOW R',
+  30: 'ENG OPER L',
+  31: 'ENG OPER R',
+  23: 'EAC',
+  26: 'AUTOPILOT: PATH',
+  25: 'AUTOPILOT: ENGAGE/DISENGAGE',
+};
+
+// "<printed label> (<button id>)", or just "Button <id>" if this particular
+// stick hasn't had a label recorded for it.
+export function btnLabel(index) {
+  const label = BTN_LABELS[index];
+  return label ? `${label} (${index})` : `Button ${index}`;
+}
+
 function loadAxisMap() {
   try { return JSON.parse(localStorage.getItem(AXIS_MAP_KEY)) || {}; } catch { return {}; }
 }
@@ -241,6 +261,15 @@ function advanceSequence(selectedPad, throttle) {
     return;
   }
 
+  // Button 23 isn't just a one-time gate to *start* arming - like the 15/16
+  // interlock, it's continuously watched afterward. Flipping it off post-arm
+  // disarms for real, mirroring disarmOrReset's interlock handling above;
+  // without this, the switch you used to arm did nothing to un-arm.
+  if (seq.armSent && !masterOn) {
+    disarmOrReset(seq);
+    return;
+  }
+
   if (seq.stage === 'idle') seq.stage = 'interlock';
 
   if (seq.stage === 'interlock' || seq.stage === 'holding' || seq.stage === 'ready') {
@@ -303,8 +332,13 @@ function tick() {
   advanceSequence(selectedPad, hotasState.throttle);
   advanceAutopilotLaunch(selectedPad);
 
-  if (hotasState.ws && hotasState.ws.readyState === WebSocket.OPEN && hotasState.throttle !== null) {
-    sendJSON({ type: 'throttle', value: hotasState.throttle });
+  // Sent every tick unconditionally - not just when the value changes, and
+  // not only while a throttle axis is mapped - so the ESP32 keeps seeing
+  // frames (and its failsafe timer keeps resetting) continuously while
+  // connected, regardless of mode or whether the stick has moved. Falls back
+  // to 0 rather than skipping the send when no axis is mapped yet.
+  if (hotasState.ws && hotasState.ws.readyState === WebSocket.OPEN) {
+    sendJSON({ type: 'throttle', value: hotasState.throttle ?? 0 });
   }
 
   notify();

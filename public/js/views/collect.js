@@ -43,7 +43,7 @@ export function render(container) {
       const calibrated = isCalibrated(record);
       const checked = c.selectedModuleIds.has(d.id);
       return `
-        <div class="module-check-row${calibrated ? '' : ' disabled'}" data-module="${escapeHtml(d.id)}">
+        <div class="module-check-row" data-module="${escapeHtml(d.id)}">
           <span class="check-box${checked ? ' checked' : ''}" data-role="checkbox">${checked ? '✓' : ''}</span>
           <span>${escapeHtml(d.name)}</span>
           <span class="module-cal-note ${calibrated ? 'ok' : 'warn'}">${calibrated ? 'calibrated' : 'needs calibration'}</span>
@@ -64,6 +64,7 @@ export function render(container) {
 
   const groups = loadChannelGroups(focusDevice?.channels, focusId);
   const tempKeys = tempChannelKeys(focusDevice?.channels);
+  const focusCalibrated = isCalibrated(store.state.calibrations[focusId]);
 
   const loadLegendHtml = groups
     .map((g, i) => `
@@ -178,7 +179,12 @@ export function render(container) {
   });
 
   container.querySelectorAll('.module-check-row').forEach((row) => {
-    if (row.classList.contains('disabled') || c.recording) return;
+    // Selecting an uncalibrated module is allowed - it just means you're
+    // viewing raw, uncalibrated numbers (e.g. from Calibrate's "Skip
+    // calibration" shortcut). The actual guardrail is recording: the
+    // collect-toggle button below stays disabled while any selected module
+    // isn't calibrated, via `allCalibrated`.
+    if (c.recording) return;
     row.addEventListener('click', () => {
       const id = row.dataset.module;
       if (c.selectedModuleIds.has(id)) c.selectedModuleIds.delete(id);
@@ -227,7 +233,7 @@ export function render(container) {
       const arr = liveWindow.groups[g.id] || [];
       if (line) line.setAttribute('points', toPath(arr, CHART_W, CHART_H, CHART_PAD));
       const legendEl = container.querySelector(`[data-legend-group="${CSS.escape(g.id)}"]`);
-      if (legendEl) legendEl.textContent = `${fmtNum(arr[arr.length - 1], 1)} N`;
+      if (legendEl) legendEl.textContent = `${fmtNum(arr[arr.length - 1], 1)} ${focusCalibrated ? 'N' : 'raw'}`;
     }
   }
 

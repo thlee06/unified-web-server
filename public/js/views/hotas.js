@@ -8,10 +8,12 @@ import {
   hotasState, onHotasChange, connectHotas, disconnectHotas, requestHotasDisarm,
   setHotasConfirmed, setAxisMapping, selectGamepad, connectedPads, buttonOn, rawAxis, uploadProfile,
   ARM_THROTTLE_GATE, BTN_INTERLOCK, BTN_HOLD, BTN_MASTER, HOLD_MS, BTN_AUTOPILOT_ENABLE, BTN_LAUNCH, LAUNCH_MS,
+  btnLabel,
 } from '../hotasControl.js';
 import {
   listProfiles, getProfile, createProfile, updateProfile, deleteProfile as deleteProfileStore,
   getActiveProfileId, setActiveProfileId, normalizePoints, interpolateThrottle, profileDurationMs,
+  MAX_POINTS, MAX_DURATION_MS,
 } from '../thrustProfile.js';
 
 const CHART_W = 760;
@@ -32,6 +34,10 @@ function ensureActiveProfile() {
     setActiveProfileId(activeId);
   }
   return activeId;
+}
+
+function joinLabels(indices, sep = ' + ') {
+  return indices.map(btnLabel).join(sep);
 }
 
 function chartSpanMs(points) {
@@ -56,6 +62,7 @@ export function render(container) {
       dragIndex: null,
       spanMs: MIN_SPAN_MS,
       circleEls: [],
+      labelEls: [],
       rowEls: [],
       lineEl: null,
       progressEls: null,
@@ -99,19 +106,19 @@ export function render(container) {
 
         <div class="card">
           <div class="step-title" style="margin-bottom:6px;">Arm sequence</div>
-          <p class="step-desc" style="margin-bottom:14px;">Hold ${BTN_INTERLOCK.join('+')}, then hold ${BTN_HOLD.join('+')} for ${(HOLD_MS / 1000).toFixed(1)}s, then flip ${BTN_MASTER}. Releasing ${BTN_INTERLOCK.join('/')} at any point resets the whole sequence.</p>
+          <p class="step-desc" style="margin-bottom:14px;">Hold ${joinLabels(BTN_INTERLOCK)}, then hold ${joinLabels(BTN_HOLD)} for ${(HOLD_MS / 1000).toFixed(1)}s, then flip ${btnLabel(BTN_MASTER)}. Releasing ${joinLabels(BTN_INTERLOCK, ' / ')} at any point resets the whole sequence.</p>
           <div class="steps" style="gap:10px;">
             <div class="step-card current" id="hotas-seq-step1" style="padding:14px 16px;">
               <div class="step-header" style="margin-bottom:0;">
                 <span class="step-token current" id="hotas-seq-step1-token"></span>
-                <div class="step-title" style="font-size:13.5px;">Safety interlock &middot; buttons ${BTN_INTERLOCK.join(' + ')}</div>
+                <div class="step-title" style="font-size:13.5px;">Safety interlock &middot; ${joinLabels(BTN_INTERLOCK)}</div>
                 <span class="step-status current" id="hotas-seq-step1-status">Waiting</span>
               </div>
             </div>
             <div class="step-card upcoming" id="hotas-seq-step2" style="padding:14px 16px;">
               <div class="step-header" style="margin-bottom:8px;">
                 <span class="step-token upcoming" id="hotas-seq-step2-token"></span>
-                <div class="step-title" style="font-size:13.5px;">Hold &middot; buttons ${BTN_HOLD.join(' + ')} for ${(HOLD_MS / 1000).toFixed(1)}s</div>
+                <div class="step-title" style="font-size:13.5px;">Hold &middot; ${joinLabels(BTN_HOLD)} for ${(HOLD_MS / 1000).toFixed(1)}s</div>
                 <span class="step-status upcoming" id="hotas-seq-step2-status">Upcoming</span>
               </div>
               <div class="axis-bar-track"><div class="axis-bar-fill" id="hotas-seq-hold-bar" style="width:0%"></div></div>
@@ -119,12 +126,12 @@ export function render(container) {
             <div class="step-card upcoming" id="hotas-seq-step3" style="padding:14px 16px;">
               <div class="step-header" style="margin-bottom:0;">
                 <span class="step-token upcoming" id="hotas-seq-step3-token"></span>
-                <div class="step-title" style="font-size:13.5px;">Master arm &middot; button ${BTN_MASTER}</div>
+                <div class="step-title" style="font-size:13.5px;">Master arm &middot; ${btnLabel(BTN_MASTER)}</div>
                 <span class="step-status upcoming" id="hotas-seq-step3-status">Upcoming</span>
               </div>
             </div>
           </div>
-          <div class="step-desc" id="hotas-seq-note" style="margin-top:12px; margin-bottom:0;">Hold buttons ${BTN_INTERLOCK.join(' and ')} to begin.</div>
+          <div class="step-desc" id="hotas-seq-note" style="margin-top:12px; margin-bottom:0;">Hold ${joinLabels(BTN_INTERLOCK, ' and ')} to begin.</div>
         </div>
 
         <div class="card" id="hotas-gamepad-panel"></div>
@@ -174,8 +181,8 @@ export function render(container) {
         <div class="step-title">Thrust profile (autopilot)</div>
       </div>
       <p class="step-desc" style="margin-bottom:14px;">
-        Plan a throttle-vs-time curve, then arm with button ${BTN_AUTOPILOT_ENABLE} held on to arm into
-        autopilot mode instead of manual. Once armed, hold button ${BTN_LAUNCH} for ${(LAUNCH_MS / 1000).toFixed(1)}s
+        Plan a throttle-vs-time curve, then arm with ${btnLabel(BTN_AUTOPILOT_ENABLE)} held on to arm into
+        autopilot mode instead of manual. Once armed, hold ${btnLabel(BTN_LAUNCH)} for ${(LAUNCH_MS / 1000).toFixed(1)}s
         to launch the profile below. The active profile is uploaded to the ESP32 automatically as you edit it.
       </p>
 
@@ -267,13 +274,13 @@ export function render(container) {
     const step3State = hotasState.armed ? 'done' : (seq.stage === 'ready' ? 'current' : 'upcoming');
     setStepClass(seqEls.step3, seqEls.step3Token, seqEls.step3Status,
       step3State,
-      hotasState.armed ? 'Armed' : seq.armSent ? 'Sent, waiting for ESP32…' : step3State === 'current' ? `Flip ${BTN_MASTER} to arm` : 'Upcoming');
+      hotasState.armed ? 'Armed' : seq.armSent ? 'Sent, waiting for ESP32…' : step3State === 'current' ? `Flip ${btnLabel(BTN_MASTER)} to arm` : 'Upcoming');
 
     let note;
     if (hotasState.armed) note = 'Armed. Sequence will reset automatically on disarm.';
     else if (seq.armSent) note = 'Arm request sent — waiting for the ESP32 to confirm.';
     else if (seq.stage === 'ready' && masterOn && !seq.masterOffSeen) {
-      note = `Button ${BTN_MASTER} has been on since before this attempt — flip it off, then on again, to arm.`;
+      note = `${btnLabel(BTN_MASTER)} has been on since before this attempt — flip it off, then on again, to arm.`;
     } else if (seq.stage === 'ready') {
       const blockers = [];
       if (hotasState.wsStatus !== 'open') blockers.push('connect to the ESP32');
@@ -283,15 +290,15 @@ export function render(container) {
       if (masterOn && blockers.length) {
         // masterOffSeen must already be true here, or the branch above would have caught it -
         // the flip already registered, it's just waiting on something else now.
-        note = `Button ${BTN_MASTER} is flipped — will arm automatically once you also: ${blockers.join(', ')}.`;
+        note = `${btnLabel(BTN_MASTER)} is flipped — will arm automatically once you also: ${blockers.join(', ')}.`;
       } else if (blockers.length) {
-        note = `Ready — flip ${BTN_MASTER} to arm once you also: ${blockers.join(', ')}.`;
+        note = `Ready — flip ${btnLabel(BTN_MASTER)} to arm once you also: ${blockers.join(', ')}.`;
       } else {
-        note = `Flip button ${BTN_MASTER} to arm.`;
+        note = `Flip ${btnLabel(BTN_MASTER)} to arm.`;
       }
-    } else if (seq.stage === 'holding') note = `Keep holding ${BTN_HOLD.join(' + ')}…`;
-    else if (seq.stage === 'interlock') note = `Hold buttons ${BTN_HOLD.join(' and ')} for ${(HOLD_MS / 1000).toFixed(1)} seconds.`;
-    else note = `Hold buttons ${BTN_INTERLOCK.join(' and ')} to begin.`;
+    } else if (seq.stage === 'holding') note = `Keep holding ${joinLabels(BTN_HOLD)}…`;
+    else if (seq.stage === 'interlock') note = `Hold ${joinLabels(BTN_HOLD, ' and ')} for ${(HOLD_MS / 1000).toFixed(1)} seconds.`;
+    else note = `Hold ${joinLabels(BTN_INTERLOCK, ' and ')} to begin.`;
     seqEls.note.textContent = note;
   }
 
@@ -404,8 +411,8 @@ export function render(container) {
 
   function patchModeUI() {
     autopilotChipEl.textContent = hotasState.autopilotEnabled
-      ? `Button ${BTN_AUTOPILOT_ENABLE}: on (will autopilot-arm)`
-      : `Button ${BTN_AUTOPILOT_ENABLE}: off (manual arm)`;
+      ? `${btnLabel(BTN_AUTOPILOT_ENABLE)}: on (will autopilot-arm)`
+      : `${btnLabel(BTN_AUTOPILOT_ENABLE)}: off (manual arm)`;
     autopilotChipEl.className = `chip ${hotasState.autopilotEnabled ? 'chip-ok' : 'chip-warn'}`;
 
     const modeLabels = { manual: 'MANUAL', autopilot_armed: 'AUTOPILOT ARMED', autopilot_running: 'AUTOPILOT RUNNING' };
@@ -420,8 +427,8 @@ export function render(container) {
       modeCaptionEl.textContent = launch.sent
         ? 'Launch sent — waiting for the ESP32 to start the profile…'
         : launch.holdStartedAt
-          ? `Hold ${BTN_LAUNCH}… ${(heldMs / 1000).toFixed(1)}s / ${(LAUNCH_MS / 1000).toFixed(1)}s`
-          : `Hold button ${BTN_LAUNCH} for ${(LAUNCH_MS / 1000).toFixed(1)}s to launch the profile.`;
+          ? `Hold ${btnLabel(BTN_LAUNCH)}… ${(heldMs / 1000).toFixed(1)}s / ${(LAUNCH_MS / 1000).toFixed(1)}s`
+          : `Hold ${btnLabel(BTN_LAUNCH)} for ${(LAUNCH_MS / 1000).toFixed(1)}s to launch the profile.`;
     } else if (hotasState.mode === 'autopilot_running') {
       modeExtraEl.style.display = '';
       const durationMs = profileDurationMs(local.profile.points);
@@ -499,15 +506,28 @@ export function render(container) {
     const spanMs = chartSpanMs(local.profile.points);
     local.profile.spanMs = spanMs;
     local.profile.points.forEach((p, i) => {
+      const cx = xForT(p.t, spanMs);
+      const cy = yForThrottle(p.throttle);
       const circle = local.profile.circleEls[i];
       if (circle) {
-        circle.setAttribute('cx', xForT(p.t, spanMs).toFixed(1));
-        circle.setAttribute('cy', yForThrottle(p.throttle).toFixed(1));
+        circle.setAttribute('cx', cx.toFixed(1));
+        circle.setAttribute('cy', cy.toFixed(1));
+      }
+      const label = local.profile.labelEls[i];
+      if (label) {
+        label.setAttribute('x', (cx + 10).toFixed(1));
+        label.setAttribute('y', (cy - 10).toFixed(1));
       }
       const row = local.profile.rowEls[i];
       if (row) {
-        row.timeInput.value = (p.t / 1000).toFixed(2);
-        row.throttleInput.value = Math.round(p.throttle * 100);
+        // Never overwrite the input the user is actively typing into - it's
+        // already showing exactly what they typed. Reformatting it (e.g.
+        // padding "1" to "1.00") on every keystroke used to yank focus/cursor
+        // and made it impossible to type anything past the first character.
+        // The canonical formatted value still lands once they blur (via
+        // commitPoints -> renderProfileCard on the 'change' event).
+        if (document.activeElement !== row.timeInput) row.timeInput.value = (p.t / 1000).toFixed(2);
+        if (document.activeElement !== row.throttleInput) row.throttleInput.value = Math.round(p.throttle * 100);
       }
     });
     if (local.profile.lineEl) {
@@ -537,6 +557,7 @@ export function render(container) {
 
     const circlesHtml = points.map((p, i) => `
       <circle data-point-circle="${i}" cx="${xForT(p.t, spanMs).toFixed(1)}" cy="${yForThrottle(p.throttle).toFixed(1)}" r="7" fill="var(--accent)" stroke="#fff" stroke-width="2" style="cursor:grab;"></circle>
+      <text data-point-label="${i}" class="point-label" x="${(xForT(p.t, spanMs) + 10).toFixed(1)}" y="${(yForThrottle(p.throttle) - 10).toFixed(1)}">${i + 1}</text>
     `).join('');
 
     const rowsHtml = points.map((p, i) => `
@@ -567,10 +588,14 @@ export function render(container) {
           <circle id="profile-progress-dot" cx="0" cy="0" r="5" fill="var(--ink)" style="display:none;"></circle>
           ${circlesHtml}
         </svg>
-        <div class="profile-axis-caption">Click empty space to add a point &middot; drag a point to adjust &middot; fine-tune exact values below</div>
+        <div class="profile-axis-caption">Click empty space on the chart to add a point, or use "+ Add point" below &middot; drag a point to adjust &middot; fine-tune exact values in the table</div>
       </div>
 
-      <div class="cal-table" style="margin-top:14px;">
+      <div style="display:flex; justify-content:flex-end; margin-top:10px;">
+        <button class="btn btn-secondary" id="profile-add-point" ${points.length >= MAX_POINTS ? 'disabled' : ''}>+ Add point</button>
+      </div>
+
+      <div class="cal-table" style="margin-top:10px;">
         <div class="cal-table-head"><span>Pt</span><span>Time (s)</span><span>Throttle (%)</span><span></span></div>
         ${rowsHtml}
       </div>
@@ -586,6 +611,7 @@ export function render(container) {
     `;
 
     local.profile.circleEls = points.map((_, i) => profileCardEl.querySelector(`[data-point-circle="${i}"]`));
+    local.profile.labelEls = points.map((_, i) => profileCardEl.querySelector(`[data-point-label="${i}"]`));
     local.profile.rowEls = points.map((_, i) => ({
       timeInput: profileCardEl.querySelector(`[data-point-time="${i}"]`),
       throttleInput: profileCardEl.querySelector(`[data-point-throttle="${i}"]`),
@@ -668,6 +694,13 @@ export function render(container) {
     });
     profileCardEl.querySelector('#profile-upload')?.addEventListener('click', () => {
       uploadProfile(local.profile.points);
+    });
+    profileCardEl.querySelector('#profile-add-point')?.addEventListener('click', () => {
+      if (local.profile.points.length >= MAX_POINTS) return;
+      const last = local.profile.points[local.profile.points.length - 1];
+      const t = last ? Math.min(MAX_DURATION_MS, last.t + 1000) : 0;
+      const throttle = last ? last.throttle : 0;
+      commitPoints([...local.profile.points, { t, throttle }]);
     });
 
     points.forEach((p, i) => {

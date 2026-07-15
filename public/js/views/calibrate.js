@@ -1,4 +1,4 @@
-import { store, deviceList } from '../state.js';
+import { store, deviceList, goToTab } from '../state.js';
 import {
   isCalibrated, loadChannelGroups, groupReading, tempChannelKeys,
   fitScale, residualsFor, CALIBRATION_VALIDITY_MS,
@@ -7,8 +7,26 @@ import { onLiveSample } from '../liveBus.js';
 import { api } from '../api.js';
 import { fmtNum, escapeHtml } from '../format.js';
 
-const STABILITY_WINDOW = 20;
-let stability = { moduleId: null, byGroup: {} };
+// How many fresh samples "Record zero" / "Capture point" average together.
+// Deliberately *not* a continuously-maintained rolling window: the thrust
+// stand gets tilted on its side to hang a known mass, which swings the raw
+// reading by orders of magnitude more than sensor noise ever would. A
+// rolling window kept that tilt transient contaminating the stats for
+// several seconds after the stand was set back down and re-zeroed. Instead,
+// samples are only ever collected in the brief moment right after the
+// button is pressed - the operator (who can see the physical rig) decides
+// when it's actually still, the software just averages whatever comes in
+// next.
+const CAPTURE_SAMPLE_COUNT = 8;
+
+let capture = { moduleId: null, byGroup: {} };
+
+// Transient feedback for the Save calibration button - the click handler is
+// async (a network round-trip), and previously gave no visible sign it had
+// done anything beyond a small "Last calibrated ... days ago" line that's
+// easy to miss and, on failure, only logged to the console. `state` is
+// null | 'saving' | 'saved' | 'error'.
+let saveStatus = { moduleId: null, state: null, message: null };
 
 function activeModuleId(devices) {
   const stored = store.state.selectedCalModuleId;
@@ -30,23 +48,32 @@ function getDraft(id, groups) {
   return draft;
 }
 
-function groupStability(groupId) {
-  return stability.byGroup[groupId] || (stability.byGroup[groupId] = []);
+function groupCapture(groupId) {
+  return capture.byGroup[groupId] || (capture.byGroup[groupId] = {
+    active: false,
+    kind: null, // 'zero' | 'point', while active
+    samples: [],
+    pendingMass: null,
+    pendingLength: null,
+    lastResult: null, // { kind, mean, stddev } for the most recently finished capture
+  });
 }
 
-function isStable(groupId) {
-  const values = groupStability(groupId);
-  if (values.length < 8) return false;
+function meanStddev(values) {
   const mean = values.reduce((a, b) => a + b, 0) / values.length;
   const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
-  const stddev = Math.sqrt(variance);
-  return stddev < Math.max(0.5, Math.abs(mean) * 0.01);
+  return { mean, stddev: Math.sqrt(variance) };
 }
 
-function windowMean(groupId) {
-  const values = groupStability(groupId);
-  if (!values.length) return null;
-  return values.reduce((a, b) => a + b, 0) / values.length;
+// Purely informational, after the fact - not a gate. If a just-finished
+// batch was itself noisy (e.g. the operator hit the button while the stand
+// was still swinging from being tilted), flag it so they know to redo that
+// step, rather than silently baking a bad average into the calibration.
+function captureQualityWarning(result) {
+  if (!result) return '';
+  const threshold = Math.max(50, Math.abs(result.mean) * 0.02);
+  if (result.stddev < threshold) return '';
+  return ` — jumped ±${fmtNum(result.stddev, 0)} counts during capture; stand may not have been still, consider redoing this`;
 }
 
 function daysBetween(a, b) {
@@ -93,13 +120,25 @@ export function render(container) {
   const draft = getDraft(id, groups);
   const savedRecord = store.state.calibrations[id];
   const tempKeys = tempChannelKeys(device?.channels);
-  if (stability.moduleId !== id) stability = { moduleId: id, byGroup: {} };
+  if (capture.moduleId !== id) capture = { moduleId: id, byGroup: {} };
+  if (saveStatus.moduleId !== id) saveStatus = { moduleId: id, state: null, message: null };
   ensureProfiles(id);
 
   const groupsZeroed = groups.every((g) => draft.groups[g.id].zeroOffset !== null);
   const groupsScaled = groups.every((g) => draft.groups[g.id].points.length >= 2);
   const step3Done = tempKeys.length === 0 || tempKeys.every((k) => draft.probes[k]);
   const canSave = groupsZeroed && groupsScaled && step3Done;
+
+  // Spelled-out reasons Save is disabled - previously the button just sat
+  // greyed out with no explanation, which reads identically to "the button
+  // is broken" if you don't already know which step you skipped.
+  const saveBlockers = [];
+  for (const g of groups) {
+    const gd = draft.groups[g.id];
+    if (gd.zeroOffset === null) saveBlockers.push(`record zero for ${g.label}`);
+    else if (gd.points.length < 2) saveBlockers.push(`capture at least 2 points for ${g.label}`);
+  }
+  if (tempKeys.length > 0 && !step3Done) saveBlockers.push('verify all temperature probes');
 
   const pillsHtml = devices
     .map((d) => `<button class="pill${d.id === id ? ' active' : ''}" data-module="${escapeHtml(d.id)}">${escapeHtml(d.name)}</button>`)
@@ -108,9 +147,9 @@ export function render(container) {
   const groupCardsHtml = groups
     .map((g) => {
       const gd = draft.groups[g.id];
+      const cap = groupCapture(g.id);
       const zeroed = gd.zeroOffset !== null;
       const scaled = gd.points.length >= 2;
-      const stable = isStable(g.id);
       const scale = scaled ? fitScale(gd.points, gd.zeroOffset) : 0;
       const residuals = scaled ? residualsFor(gd.points, gd.zeroOffset, scale) : [];
       const pointRows = gd.points
@@ -127,6 +166,16 @@ export function render(container) {
         })
         .join('');
 
+      const zeroCaption = cap.active && cap.kind === 'zero'
+        ? `sampling&hellip; ${cap.samples.length}/${CAPTURE_SAMPLE_COUNT}`
+        : zeroed
+          ? `baseline&nbsp;${fmtNum(gd.zeroOffset, 2)}${escapeHtml(cap.lastResult?.kind === 'zero' ? captureQualityWarning(cap.lastResult) : '')}`
+          : '';
+
+      const captureCaption = cap.active && cap.kind === 'point'
+        ? `sampling&hellip; ${cap.samples.length}/${CAPTURE_SAMPLE_COUNT}`
+        : escapeHtml(cap.lastResult?.kind === 'point' ? captureQualityWarning(cap.lastResult) : '');
+
       return `
         <div class="card step-card group-card ${zeroed && scaled ? 'done' : 'current'}" data-group="${escapeHtml(g.id)}">
           <div class="step-header">
@@ -136,24 +185,30 @@ export function render(container) {
           </div>
           <p class="step-desc">Channels: ${escapeHtml(g.keys.join(', '))}${g.keys.length > 1 ? ' (averaged as one reading)' : ''}</p>
 
+          <p class="step-desc" style="margin-bottom:8px;">${zeroed
+            ? `Tilt the stand and hang a known mass, then click Capture point once it's still - each click takes a fresh batch of ${CAPTURE_SAMPLE_COUNT} samples and averages them, so it doesn't matter what the reading was doing before you press it. Add at least 2 points (more, at different masses, for a tighter fit).`
+            : `Keep the stand flat and still, then click Record zero - it takes ${CAPTURE_SAMPLE_COUNT} fresh samples and averages them for the baseline.`}</p>
+
           <div style="display:flex; align-items:center; gap:14px; margin-bottom:16px;">
-            <button class="btn btn-secondary" data-role="record-zero" ${stable ? '' : 'disabled'}>${zeroed ? 'Re-record zero' : 'Record zero'}</button>
-            <span class="mono" data-role="zero-caption" style="font-size:12.5px; color:var(--faint);">${zeroed ? `baseline&nbsp; ${fmtNum(gd.zeroOffset, 2)}` : (stable ? 'signal stable' : 'waiting for signal to settle&hellip;')}</span>
+            <button class="btn btn-secondary" data-role="record-zero" ${cap.active ? 'disabled' : ''}>${zeroed ? 'Re-record zero' : 'Record zero'}</button>
+            <span class="mono" data-role="zero-caption" style="font-size:12.5px; color:var(--faint);">${zeroCaption}</span>
           </div>
 
           <div class="field-row">
             <label class="field">Known mass (kg)
-              <input class="field-input" data-role="mass-input" type="number" step="0.001" min="0" value="${escapeHtml(gd.massInput)}" ${zeroed ? '' : 'disabled'} />
+              <input class="field-input" data-role="mass-input" type="number" step="0.001" min="0" value="${escapeHtml(gd.massInput)}" ${zeroed && !cap.active ? '' : 'disabled'} />
             </label>
             <label class="field">Gauge length (mm)
-              <input class="field-input" data-role="length-input" type="number" step="0.1" min="0" value="${escapeHtml(gd.lengthInput)}" ${zeroed ? '' : 'disabled'} />
+              <input class="field-input" data-role="length-input" type="number" step="0.1" min="0" value="${escapeHtml(gd.lengthInput)}" ${zeroed && !cap.active ? '' : 'disabled'} />
             </label>
-            <button class="btn btn-primary" data-role="capture-point" style="height:39px;" ${zeroed && stable ? '' : 'disabled'}>Capture point</button>
+            <button class="btn btn-primary" data-role="capture-point" style="height:39px;" ${zeroed && !cap.active ? '' : 'disabled'}>Capture point</button>
           </div>
+          <div class="mono" data-role="capture-caption" style="font-size:12.5px; color:var(--faint); margin:-10px 0 14px;">${captureCaption}</div>
           <div class="cal-table">
             <div class="cal-table-head"><span>Pt</span><span>Mass</span><span>Reading</span><span>Residual</span></div>
             ${pointRows || '<div class="run-empty" style="grid-column:1/-1;">No points captured yet.</div>'}
           </div>
+          ${scaled ? `<p class="step-desc" style="margin-top:10px; margin-bottom:0;">Residuals in <span class="res-bad">orange</span> are larger than expected for this fit - check the mass entry for that point, or add another point to improve the fit.</p>` : ''}
         </div>
       `;
     })
@@ -225,10 +280,14 @@ export function render(container) {
         </div>
 
         <div class="cal-footer">
-          <span class="meta mono">${footerMeta}</span>
+          <div>
+            <span class="meta mono">${footerMeta}</span>
+            ${!canSave && saveBlockers.length ? `<div class="step-desc" style="margin:6px 0 0; font-size:12px;">Before saving: ${escapeHtml(saveBlockers.join('; '))}.</div>` : ''}
+            <div class="mono" id="save-status" style="margin-top:6px; font-size:12px; color:${saveStatus.state === 'error' ? 'var(--accent-text)' : 'var(--ok)'}; display:${saveStatus.state ? '' : 'none'};">${escapeHtml(saveStatus.message || '')}</div>
+          </div>
           <div style="display:flex; gap:10px;">
             ${groups.length ? `<button class="btn btn-secondary" id="save-profile" ${canSave ? '' : 'disabled'}>Save as profile&hellip;</button>` : ''}
-            <button class="btn btn-dark" id="save-calibration" ${canSave ? '' : 'disabled'}>Save calibration</button>
+            <button class="btn btn-dark" id="save-calibration" ${canSave ? '' : 'disabled'}>${saveStatus.state === 'saving' ? 'Saving…' : 'Save calibration'}</button>
           </div>
         </div>
       </div>
@@ -241,8 +300,14 @@ export function render(container) {
             <div class="readout-value primary mono" data-role="readout-value">&mdash;<span class="readout-unit">raw</span></div>
           </div>
         `).join('') : `<div class="readout-block"><div class="readout-label">No load channels on this module</div></div>`}
-        <div class="readout-caption" id="readout-caption">${groups.some((g) => isStable(g.id)) || groups.length === 0 ? 'Watching signal&hellip;' : 'Waiting for the reading to settle before capturing a point.'}</div>
+        <div class="readout-caption" id="readout-caption">${groups.length === 0 ? 'No load channels — verify probes above.' : 'Click Record zero or Capture point on a channel when the stand is ready.'}</div>
       </div>
+    </div>
+
+    <div class="card" style="margin-top:20px;">
+      <div class="step-title" style="margin-bottom:6px;">Skip calibration</div>
+      <p class="step-desc" style="margin-bottom:14px;">Just want to see what this module is reporting right now, without doing the tare/known-load steps? View its raw, uncalibrated data in Collect - you still won't be able to start an actual recording until it's calibrated, this is a quick sanity check only.</p>
+      <button class="btn btn-secondary" id="skip-calibration">View raw data in Collect</button>
     </div>
   `;
 
@@ -255,23 +320,28 @@ export function render(container) {
 
   container.querySelectorAll('.group-card').forEach((card) => {
     const gid = card.dataset.group;
-    const g = groups.find((x) => x.id === gid);
-    const gd = draft.groups[gid];
 
     card.querySelector('[data-role="record-zero"]')?.addEventListener('click', () => {
-      const mean = windowMean(gid);
-      if (typeof mean !== 'number') return;
-      gd.zeroOffset = mean;
+      const cap = groupCapture(gid);
+      if (cap.active) return;
+      cap.active = true;
+      cap.kind = 'zero';
+      cap.samples = [];
       store.notify();
     });
-    card.querySelector('[data-role="mass-input"]')?.addEventListener('input', (e) => { gd.massInput = e.target.value; });
-    card.querySelector('[data-role="length-input"]')?.addEventListener('input', (e) => { gd.lengthInput = e.target.value; });
+    card.querySelector('[data-role="mass-input"]')?.addEventListener('input', (e) => { draft.groups[gid].massInput = e.target.value; });
+    card.querySelector('[data-role="length-input"]')?.addEventListener('input', (e) => { draft.groups[gid].lengthInput = e.target.value; });
     card.querySelector('[data-role="capture-point"]')?.addEventListener('click', () => {
+      const cap = groupCapture(gid);
+      if (cap.active) return;
       const mass = Number(card.querySelector('[data-role="mass-input"]').value);
       const length = Number(card.querySelector('[data-role="length-input"]').value);
-      const mean = windowMean(gid);
-      if (!(mass > 0) || typeof mean !== 'number') return;
-      gd.points.push({ mass, length, reading: mean });
+      if (!(mass > 0)) return;
+      cap.active = true;
+      cap.kind = 'point';
+      cap.samples = [];
+      cap.pendingMass = mass;
+      cap.pendingLength = length;
       store.notify();
     });
   });
@@ -334,44 +404,76 @@ export function render(container) {
       savedAt: Date.now(),
       expiresAt: Date.now() + CALIBRATION_VALIDITY_MS,
     };
+    saveStatus = { moduleId: id, state: 'saving', message: null };
+    store.notify();
     try {
       await api.saveCalibration(id, record);
       store.state.calibrations[id] = record;
       // Deliberately keep the draft around (rather than clearing it) so
       // "Save as profile" is still available right after saving - it reads
       // canSave off the same draft, and this is the natural next action.
+      const thisSave = (saveStatus = { moduleId: id, state: 'saved', message: `Saved ✓ (expires in ${daysBetween(Date.now(), record.expiresAt)} days)` });
       store.notify();
+      // Auto-fade the success message after a few seconds so it reads as a
+      // toast, not a permanent label - but only if nothing newer (another
+      // save, a module switch) has replaced it in the meantime.
+      setTimeout(() => {
+        if (saveStatus === thisSave) {
+          saveStatus = { moduleId: id, state: null, message: null };
+          store.notify();
+        }
+      }, 4000);
     } catch (err) {
       console.error('Failed to save calibration', err);
+      saveStatus = { moduleId: id, state: 'error', message: `Failed to save — ${err.message || 'check the server connection'} (retry?)` };
+      store.notify();
     }
   });
 
-  // --- live patching ---
-  const captionEl = container.querySelector('#readout-caption');
+  container.querySelector('#skip-calibration')?.addEventListener('click', () => {
+    goToTab('collect', { collectModuleId: id });
+  });
 
+  // --- live patching ---
+  // Two-tier reactivity: the raw readout number and a capture's in-progress
+  // "sampling… n/8" text are patched directly here on every sample (liveBus
+  // tier). Finishing a capture (applying a new zero/point) is a structural
+  // change, so it goes through store.notify() instead - deferred to a
+  // microtask so it doesn't tear down/rebuild this view's DOM (and its own
+  // onLiveSample subscription) from inside liveBus's own dispatch loop.
   const unsubscribe = onLiveSample((msg) => {
     if (msg.id !== id) return;
+
+    let finished = false;
 
     for (const g of groups) {
       const reading = groupReading(msg.values, g);
       if (reading === null) continue;
-      const values = groupStability(g.id);
-      values.push(reading);
-      if (values.length > STABILITY_WINDOW) values.shift();
 
       const readoutEl = container.querySelector(`[data-readout-group="${CSS.escape(g.id)}"] [data-role="readout-value"]`);
       if (readoutEl) readoutEl.innerHTML = `${fmtNum(reading, 2)}<span class="readout-unit">raw</span>`;
 
+      const cap = groupCapture(g.id);
+      if (!cap.active) continue;
+
+      cap.samples.push(reading);
+
       const card = container.querySelector(`.group-card[data-group="${CSS.escape(g.id)}"]`);
-      if (card) {
-        const stable = isStable(g.id);
-        const zeroed = draft.groups[g.id].zeroOffset !== null;
-        const zeroBtn = card.querySelector('[data-role="record-zero"]');
-        const captureBtn = card.querySelector('[data-role="capture-point"]');
-        const zeroCaption = card.querySelector('[data-role="zero-caption"]');
-        if (zeroBtn) zeroBtn.disabled = !stable;
-        if (captureBtn) captureBtn.disabled = !(zeroed && stable);
-        if (zeroCaption && !zeroed) zeroCaption.textContent = stable ? 'signal stable' : 'waiting for signal to settle…';
+      const captionEl = card?.querySelector(cap.kind === 'zero' ? '[data-role="zero-caption"]' : '[data-role="capture-caption"]');
+      if (captionEl) captionEl.textContent = `sampling… ${cap.samples.length}/${CAPTURE_SAMPLE_COUNT}`;
+
+      if (cap.samples.length >= CAPTURE_SAMPLE_COUNT) {
+        const { mean, stddev } = meanStddev(cap.samples);
+        const kind = cap.kind;
+        cap.active = false;
+        cap.kind = null;
+        cap.lastResult = { kind, mean, stddev };
+        if (kind === 'zero') {
+          draft.groups[g.id].zeroOffset = mean;
+        } else {
+          draft.groups[g.id].points.push({ mass: cap.pendingMass, length: cap.pendingLength, reading: mean });
+        }
+        finished = true;
       }
     }
 
@@ -382,14 +484,7 @@ export function render(container) {
       }
     }
 
-    if (captionEl) {
-      const anyStable = groups.some((g) => isStable(g.id));
-      captionEl.textContent = groups.length === 0
-        ? 'No load channels — verify probes above.'
-        : anyStable
-          ? 'Signal stable. Safe to capture a point.'
-          : 'Waiting for the reading to settle before capturing a point.';
-    }
+    if (finished) queueMicrotask(() => store.notify());
   });
 
   return () => unsubscribe();

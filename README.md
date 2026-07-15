@@ -307,6 +307,54 @@ that logic is mode-specific on the browser side (see `disarmOrReset()` in
 `hotasControl.js`) and shouldn't become mode-specific on the firmware side
 either.
 
+## Firmware
+
+The HOTAS ESC controller firmware (the ESP32 sketch that implements the wire
+protocol above) lives in `firmware/`, a git **submodule** pointing at its own
+PlatformIO project/repo - it isn't part of this repo's own history. Clone
+with `git clone --recurse-submodules`, or after a plain clone run:
+
+```sh
+git submodule update --init --recursive
+```
+
+**As of the current submodule commit, the firmware only implements the
+pre-autopilot protocol** - plain `arm`/`throttle`/`disarm`/`upload_profile`
+plus a `run_profile` command, no `mode`/`autopilot_elapsed_ms` in `status`,
+and no `autopilot` arm flag. It needs the following changes (in
+`firmware/src/main.cpp` and `firmware/src/BuzzerDriver.h`) to match the
+protocol documented above:
+
+- Extend `ArmState` with `AUTOPILOT_ARMED` and `AUTOPILOT_RUNNING`, and give
+  the pending arm request a way to carry the requested mode from `arm`
+  through the existing `ARMING` hold (e.g. a `bool armingAutopilot` on
+  `Rig`, read from `doc["autopilot"] | false` in the `arm` handler). When the
+  `ARM_HOLD_MS` hold completes, transition to `AUTOPILOT_ARMED` instead of
+  `ARMED` if it was set.
+- Replace the `run_profile` message handler with `launch_autopilot`, gated on
+  `rig.state == AUTOPILOT_ARMED` (not `ARMED`) and `profile.count >= 2`;
+  on success, transition to `AUTOPILOT_RUNNING` and record `profile.startMs`.
+- In `sendStatusNow()`, add `mode` (`"manual"` / `"autopilot_armed"` /
+  `"autopilot_running"`, derived from `rig.state`) and `autopilot_elapsed_ms`
+  (only included, i.e. non-null, while `AUTOPILOT_RUNNING` - `millis() -
+  profile.startMs`). `armed` should be `true` for `ARMED`, `AUTOPILOT_ARMED`,
+  and `AUTOPILOT_RUNNING` alike.
+- `tickProfile()` should run whenever `rig.state == AUTOPILOT_RUNNING`
+  (currently gated on `ARMED`), and on reaching the final point's time it
+  must force idle PWM and fall all the way back to `DISARMED` - not hold the
+  last throttle value, which is what it does today.
+- The `throttle` message handler already only applies stick input when
+  `rig.state == ARMED`, so `AUTOPILOT_ARMED`/`AUTOPILOT_RUNNING` are silently
+  ignored there for free once they're separate enum values - no change
+  needed beyond making sure they don't fall into that branch.
+- Broaden the failsafe check and the LED "armed" state to treat
+  `AUTOPILOT_ARMED`/`AUTOPILOT_RUNNING` the same as `ARMED`, since the
+  universal 300ms-no-frame kill switch and the solid-on armed LED shouldn't
+  be manual-mode-specific.
+- Add distinct buzzer patterns for autopilot-armed, launch, and
+  run-complete, so they're audibly distinguishable from the existing manual
+  arm/disarm tones.
+
 ## Project layout
 
 ```
@@ -335,6 +383,7 @@ public/
   vendor/               Vendored uPlot charting library (unused by the current UI)
 tools/
   simulate-module.js    Mock ESP32 for testing without hardware
+firmware/               Git submodule: ESP32 HOTAS ESC controller (PlatformIO) - see "Firmware" above
 ```
 
 No database, no auth, no bundler - this is a small LAN-only tool. Calibration
